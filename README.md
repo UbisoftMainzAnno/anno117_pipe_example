@@ -33,6 +33,8 @@ struct ProductionEntryData
 ```
 See `pipe.cpp` for the communication protocol.
 
+Protocol version 3 adds `TradeRouteEntryData` and `ItemOfferEntryData`.
+
 ## Activation
 The pipe can be activated by adding the launch argument `/pipe` to the game.
 Statistics data is sent periodically to the pipe.

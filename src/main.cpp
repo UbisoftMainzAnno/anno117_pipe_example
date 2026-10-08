@@ -6,26 +6,27 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "imgui_impl.h"
 
 #include "pipe.h"
 
-void DrawImGui(std::mutex& productionDataMutex, std::map<std::string, std::map<std::int32_t, std::deque<anno_pipe::ProductionEntryData>>>& productionData, const std::string& headline)
+void DrawImGui(std::mutex& productionDataMutex, std::map<std::string, std::map<std::int32_t, std::deque<anno_pipe::ProductionEntryData>>>& productionData, const std::string& headline, const std::map<std::string, std::vector<anno_pipe::TradeRouteEntryData>>& tradeData, const std::map<std::int32_t, anno_pipe::ItemOfferEntryData>& itemOffers)
 {
 	std::lock_guard lock{ productionDataMutex };
 
-	ImGui::SetNextWindowSize({ 1280.f, 800.f }, ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize({ 640.f, 800.f }, ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowPos({ 0.f, 0.f }, ImGuiCond_FirstUseEver);
 
 	ImGui::Begin("Production");
-
 	ImGui::Text(headline.c_str());
 	for (auto& [name, products] : productionData)
 	{
@@ -45,7 +46,97 @@ void DrawImGui(std::mutex& productionDataMutex, std::map<std::string, std::map<s
 			ImGui::PopID();
 		}
 	}
+	ImGui::End();
 
+	ImGui::SetNextWindowSize({ 640.f, 600.f }, ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowPos({ 640.f, 0.f }, ImGuiCond_FirstUseEver);
+
+	ImGui::Begin("Trade Routes");
+	ImGui::PushID("Trade Routes");
+	for (const auto& [folder, routes] : tradeData)
+	{
+		if (ImGui::TreeNode(folder.c_str()))
+		{
+			ImGui::PushID(folder.c_str());
+			for (const auto& route : routes)
+			{
+				const auto label = std::format("{}{}{}", route.Name, (route.Errors ? " [!]" : ""), (route.Warnings ? " [?]" : ""));
+				if (ImGui::TreeNode(label.c_str()))
+				{
+					ImGui::PushID(route.Name.c_str());
+					ImGui::Text("%d active ships, %d lost ships", route.Ships, route.LostShips);
+					if (!route.Stations.empty() && ImGui::BeginTabBar("stations"))
+					{
+						for (const auto& station : route.Stations)
+						{
+							const auto stationLabel = std::format("{}[{}]", station.ID, station.Owner);
+							if (ImGui::BeginTabItem(stationLabel.c_str()))
+							{
+								for (const auto& good : station.Goods)
+								{
+									ImGui::Text("%s %dx [%d]", (good.Loading ? "->" : "<-"), good.Amount, good.GUID);
+								}
+
+								ImGui::EndTabItem();
+							}
+						}
+
+						ImGui::EndTabBar();
+					}
+					ImGui::PopID();
+					ImGui::TreePop();
+				}
+			}
+			ImGui::PopID();
+			ImGui::TreePop();
+		}
+	}
+	ImGui::PopID();
+	ImGui::End();
+
+	ImGui::SetNextWindowSize({ 640.f, 200.f }, ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowPos({ 640.f, 600.f }, ImGuiCond_FirstUseEver);
+
+	ImGui::Begin("Item Offers");
+	ImGui::PushID("Item Offers");
+	for (const auto& [trader, items] : itemOffers)
+	{
+		const auto label = std::format("Trader {}", trader);
+		if (ImGui::CollapsingHeader(label.c_str()))
+		{
+			ImGui::PushID(label.c_str());
+			constexpr int cols = 4;
+
+			if (ImGui::BeginTable("items", cols, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ImGui::GetColorU32({0.3f, 0.3f, 0.3f, 1.f}));
+
+				std::size_t i = 0;
+				while (i < items.Items.size())
+				{
+					ImGui::TableNextRow();
+
+					for (int j = 0; j < cols; ++j)
+					{
+						if(i + j < items.Items.size())
+						{
+							ImGui::TableSetColumnIndex(j);
+
+							const auto itemLabel = std::format("[{}]", items.Items[i + j]);
+							ImGui::Text(itemLabel.c_str());
+						}
+					}
+
+					i += cols;
+				}
+
+				ImGui::EndTable();
+			}
+
+			ImGui::PopID();
+		}
+	}
+	ImGui::PopID();
 	ImGui::End();
 }
 
@@ -58,11 +149,13 @@ int main()
 		return EXIT_FAILURE;
 	}
 
-	std::mutex productionDataMutex;
+	std::mutex dataMutex;
 	std::map<std::string, std::map<std::int32_t, std::deque<anno_pipe::ProductionEntryData>>> productionData;
+	std::map<std::string, std::vector<anno_pipe::TradeRouteEntryData>> tradeData;
+	std::map<std::int32_t, anno_pipe::ItemOfferEntryData> itemOffersData;
 	std::string headline;
 
-	std::jthread pipe_thread{ anno_pipe::RunPipe, std::ref(headline), std::ref(productionData), std::ref(productionDataMutex) };
+	std::jthread pipe_thread{ anno_pipe::RunPipe, std::ref(headline), std::ref(productionData), std::ref(tradeData), std::ref(itemOffersData), std::ref(dataMutex) };
 
 	bool done = false;
 	while (!done)
@@ -94,7 +187,7 @@ int main()
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
 
-		DrawImGui(productionDataMutex, productionData, headline);
+		DrawImGui(dataMutex, productionData, headline, tradeData, itemOffersData);
 
 		// Rendering
 		ImGui::Render();

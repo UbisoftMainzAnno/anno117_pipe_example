@@ -120,6 +120,87 @@ void ProductionEntryData::read(std::size_t& pos, const std::span<const unsigned 
 
 //////////////////////////////////////////////////////////////////////////
 
+void TradeRouteEntryData::read(std::size_t& pos, const std::span<const unsigned char> data)
+{
+	Name = ReadString(pos, data);
+	Folder = ReadString(pos, data);
+
+	Errors = ReadInt32(pos, data);
+	Warnings = ReadInt32(pos, data);
+
+	Ships = ReadInt32(pos, data);
+	LostShips = ReadInt32(pos, data);
+
+	const auto numStations = ReadInt32(pos, data);
+	Stations.resize(numStations);
+	for (auto& station : Stations)
+	{
+		station.read(pos, data);
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+void TradeRouteEntryData::StationData::read(std::size_t& pos, const std::span<const unsigned char> data)
+{
+	ID = ReadInt32(pos, data);
+
+	if (pos + 3 > data.size())
+	{
+		return;
+	}
+	SessionID = data[pos++];
+	IslandID = data[pos++];
+	AreaIndex = data[pos++];
+	SessionGUID = ReadInt32(pos, data);
+	Owner = ReadInt32(pos, data);
+
+	if (pos + 1 > data.size())
+	{
+		return;
+	}
+	const int flags = data[pos++];
+	ThrowOverboard = (flags & (1 << 0)) != 0;
+	WaitUntilFull  = (flags & (1 << 1)) != 0;
+	WaitUntilEmpty = (flags & (1 << 2)) != 0;
+
+	const auto numGoods = ReadInt32(pos, data);
+	Goods.resize(numGoods);
+	for (auto& good : Goods)
+	{
+		good.read(pos, data);
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+void TradeRouteEntryData::StationData::GoodsData::read(std::size_t& pos, const std::span<const unsigned char> data)
+{
+	GUID = ReadInt32(pos, data);
+	Amount = ReadInt32(pos, data);
+
+	if (pos + 1 > data.size())
+	{
+		return;
+	}
+	const int loadFlags = data[pos++];
+	Loading = (loadFlags & (1 << 0)) != 0;
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+void ItemOfferEntryData::read(std::size_t& pos, const std::span<const unsigned char> data)
+{
+	const auto numItems = ReadInt32(pos, data);
+	Items.resize(numItems);
+	for (auto& item : Items)
+	{
+		item = ReadInt32(pos, data);
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////
+
 [[noreturn]] void ErrorExit()
 {
 	const auto error = ::GetLastError();
@@ -130,9 +211,9 @@ void ProductionEntryData::read(std::size_t& pos, const std::span<const unsigned 
 //////////////////////////////////////////////////////////////////////////
 
 void RunPipe(std::stop_token stop, std::string& headline, std::map<std::string, std::map<std::int32_t, std::deque<anno_pipe::ProductionEntryData>>>& productionData,
-	std::mutex& productionDataMutex)
+	std::map<std::string, std::vector<anno_pipe::TradeRouteEntryData>>& tradeData, std::map<std::int32_t, ItemOfferEntryData>& itemOffers, std::mutex& dataMutex)
 {
-	auto ReadFromPipe = [&headline, &productionData, &productionDataMutex](HANDLE pipe, unsigned char* const data, const std::size_t numBytes, DWORD& readBytes)
+	auto ReadFromPipe = [&headline, &productionData, &tradeData, &itemOffers, &dataMutex](HANDLE pipe, unsigned char* const data, const std::size_t numBytes, DWORD& readBytes)
 	{
 		if (ReadFile(pipe, data, static_cast<DWORD>(numBytes), &readBytes, nullptr) == 0)
 		{
@@ -141,9 +222,11 @@ void RunPipe(std::stop_token stop, std::string& headline, std::map<std::string, 
 			{
 				std::cout << "Pipe was closed.\n";
 
-				std::lock_guard lock{ productionDataMutex };
+				std::lock_guard lock{ dataMutex };
 				headline = "Session End";
 				productionData.clear();
+				tradeData.clear();
+				itemOffers.clear();
 				return false;
 			}
 			ErrorExit();
@@ -261,7 +344,7 @@ void RunPipe(std::stop_token stop, std::string& headline, std::map<std::string, 
 				continue;
 			}
 
-			std::lock_guard lock{ productionDataMutex };
+			std::lock_guard lock{ dataMutex };
 
 			const auto type = static_cast<Message>((*buffer)[pos++]);
 
@@ -270,12 +353,16 @@ void RunPipe(std::stop_token stop, std::string& headline, std::map<std::string, 
 				std::cout << "SessionEnd [" << readBytes << " bytes]\n";
 				headline = "Session End";
 				productionData.clear();
+				tradeData.clear();
+				itemOffers.clear();
 			}
 			else if (type == Message::SessionStart)
 			{
 				std::cout << "SessionStart[" << readBytes << " bytes]\n";
 				headline = ReadString(pos, {buffer->data(), size});
 				productionData.clear();
+				tradeData.clear();
+				itemOffers.clear();
 			}
 			else if (type == Message::AreaProductionStatistics)
 			{
@@ -310,6 +397,50 @@ void RunPipe(std::stop_token stop, std::string& headline, std::map<std::string, 
 					{
 						q.pop_front();
 					}
+				}
+			}
+			else if (type == Message::TradeRoutes)
+			{
+				tradeData.clear();
+
+				std::cout << "TradeRoutes[" << readBytes << " bytes]\n";
+
+				const auto numEntries = ReadInt32(pos, {buffer->data(), size});
+				for (std::int32_t i = 0; i < numEntries; ++i)
+				{
+					const auto tradeRouteID = ReadInt32(pos, {buffer->data(), size});
+
+					TradeRouteEntryData entry;
+					entry.read(pos, {buffer->data(), size});
+
+					std::cout << "route [" << tradeRouteID << "|" << entry.Name << "|" << entry.Folder << "]" << ((entry.Errors > 0) ? " major problems" : "")
+						<< ((entry.Warnings > 0) ? " minor problems" : "") << " #ships: " << entry.Ships << " #lost: " << entry.LostShips << " with: " << entry.Stations.size() << " stations\n";
+
+					tradeData[entry.Folder].push_back(std::move(entry));
+				}
+			}
+			else if (type == Message::ItemOffers)
+			{
+				itemOffers.clear();
+
+				std::cout << "ItemOffers[" << readBytes << " bytes]\n";
+
+				const auto numEntries = ReadInt32(pos, {buffer->data(), size});
+				for (std::int32_t i = 0; i < numEntries; ++i)
+				{
+					const auto trader = ReadInt32(pos, {buffer->data(), size});
+
+					ItemOfferEntryData entry;
+					entry.read(pos, {buffer->data(), size});
+
+					std::cout << "trader [" << trader << "]";
+					for(const auto item : entry.Items)
+					{
+						std::cout << " " << item;
+					}
+					std::cout << "\n";
+
+					itemOffers[trader] = std::move(entry);
 				}
 			}
 		}
