@@ -70,3 +70,6 @@ Testing/
 
 # imgui config
 imgui.ini
+
+# VS
+.vs/
